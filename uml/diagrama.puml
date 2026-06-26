@@ -1,0 +1,349 @@
+@startuml ProjetoA3 - Sistema PIX com Gerenciamento de Denuncias
+
+!theme plain
+skinparam classAttributeIconSize 0
+skinparam classFontSize 12
+skinparam packageFontSize 13
+skinparam linetype ortho
+skinparam nodesep 60
+skinparam ranksep 80
+
+title Sistema Bradesco PIX - Diagrama de Classes UML
+
+' ===========================
+' ENUMERACOES
+' ===========================
+
+package "Enumeracoes" #LightYellow {
+  enum TipoTransacao {
+    PIX
+    TED
+    DOC
+    BOLETO
+    TRANSFERENCIA_INTERNA
+  }
+
+  enum StatusTransacao {
+    PROCESSANDO
+    PROCESSADO
+    EM_ANALISE
+    SUSPEITO
+    DEVOLVIDO
+    FALHOU
+  }
+
+  enum MotivoDenuncia {
+    FRAUDE
+    GOLPE
+    ENGANO
+    INVASAO_CONTA
+    OUTROS
+  }
+
+  enum StatusDenuncia {
+    PENDENTE
+    EM_ANALISE
+    CONFIRMADA
+    RECUSADA
+    APROVADA_AGUARDANDO_FUNDOS
+  }
+
+  enum DecisaoAuditoria {
+    APROVADA
+    RECUSADA
+  }
+
+  enum RoleUsuario {
+    usuario
+    auditor
+  }
+}
+
+' ===========================
+' MODELOS DE BACKEND
+' ===========================
+
+package "Backend - Modelos (Sequelize / MySQL)" #LightBlue {
+
+  class Usuario {
+    + id : INTEGER <<PK, AI>>
+    + nome : STRING(100) <<NOT NULL>>
+    + cpf : STRING(14) <<UNIQUE, NOT NULL>>
+    + saldo : DECIMAL(12,2) = 0.0
+    + denuncia : BOOLEAN = false
+    + recebeu_denuncia : INTEGER = 0
+    + role : RoleUsuario = "usuario"
+  }
+
+  class Transacao {
+    + id : INTEGER <<PK, AI>>
+    + e2e_id : STRING(35) <<UNIQUE, NOT NULL>>
+    + valor : DECIMAL(12,2) <<NOT NULL>>
+    + tipo : TipoTransacao = "PIX"
+    + status : StatusTransacao = "PROCESSANDO"
+    + descricao : STRING(255)
+    + data_transacao : DATE <<NOT NULL>>
+    + ip_origem : STRING
+    + dispositivo : STRING
+    + idempotency_key : STRING(100) <<UNIQUE>>
+    + codigo_autorizacao : STRING(50)
+    + saldo_anterior_origem : DECIMAL(12,2)
+    + saldo_posterior_origem : DECIMAL(12,2)
+    + saldo_anterior_destino : DECIMAL(12,2)
+    + saldo_posterior_destino : DECIMAL(12,2)
+    + origem_id : INTEGER <<FK>>
+    + destino_id : INTEGER <<FK>>
+  }
+
+  class Denuncia {
+    + id : INTEGER <<PK, AI>>
+    + transacao_id : INTEGER <<FK, NOT NULL>>
+    + e2e_id : STRING(35) <<UNIQUE>>
+    + valor_roubado : DECIMAL(12,2) <<NOT NULL>>
+    + motivo : MotivoDenuncia <<NOT NULL>>
+    + descricao : TEXT
+    + status : StatusDenuncia = "PENDENTE"
+    + sla_limite : DATE
+    + data_denuncia : DATE <<NOT NULL>>
+    + ip_origem : STRING
+    + user_agent : TEXT
+    + id_denunciante : INTEGER <<FK>>
+    + id_denunciado : INTEGER <<FK>>
+  }
+
+  class LogAuditoria {
+    + id : INTEGER <<PK, AI>>
+    + denuncia_id : INTEGER <<NOT NULL>>
+    + auditor_id : INTEGER <<NOT NULL>>
+    + decisao : DecisaoAuditoria <<NOT NULL>>
+    + motivo : STRING(100) <<NOT NULL>>
+    + observacoes : TEXT
+    + valor_devolvido : DECIMAL(12,2)
+    + criado_em : TIMESTAMP <<created_at>>
+  }
+}
+
+' ===========================
+' RELACIONAMENTOS DO BANCO
+' ===========================
+
+Usuario "1" --o{ "0..*" Transacao : "origem\n(remetente)"
+Usuario "1" --o{ "0..*" Transacao : "destino\n(destinatario)"
+Usuario "1" --o{ "0..*" Denuncia : "denunciante"
+Usuario "1" --o{ "0..*" Denuncia : "denunciado"
+Transacao "1" --o| "0..1" Denuncia : "possui"
+
+' ===========================
+' ROTAS DA API REST
+' ===========================
+
+package "Backend - API Routes (Express.js)" #LightGreen {
+
+  class UsuarioController <<Route /usuarios>> {
+    + GET / : listarTodos()
+    + POST / : criar(nome, cpf, saldo?)
+    + GET /:id : buscarPorId(id)
+    + PUT /:id : atualizar(id, nome)
+  }
+
+  class TransacaoController <<Route /transacoes>> {
+    + GET / : listar(usuarioId?)
+  }
+
+  class DenunciaController <<Route /denuncias>> {
+    + GET / : listar(id_denunciante?)
+    + POST / : registrar(payload)
+    + DELETE /:id : remover(id, id_denunciante)
+  }
+
+  class AuditoriaController <<Route /auditoria>> {
+    + GET /denuncias : listarPendentes(auditor_id)
+    + POST /denuncias/:id/aprovar : aprovar(id, payload)
+    + POST /denuncias/:id/recusar : recusar(id, payload)
+    - verificarAuditor(id) : boolean
+  }
+
+  class PixController <<Route /pix>> {
+    + POST / : transferir(payload)
+    - gerarE2EId() : string
+  }
+}
+
+UsuarioController ..> Usuario : manipula
+TransacaoController ..> Transacao : manipula
+DenunciaController ..> Denuncia : manipula
+AuditoriaController ..> Denuncia : revisa
+AuditoriaController ..> LogAuditoria : registra
+PixController ..> Transacao : cria
+PixController ..> Usuario : debita/credita
+
+' ===========================
+' FRONTEND - INTERFACES TypeScript
+' ===========================
+
+package "Frontend - Interfaces TypeScript" #LightCoral {
+
+  interface IUsuario {
+    + id : number
+    + nome : string
+    + cpf : string
+    + saldo : number
+    + denuncia? : boolean
+    + recebeu_denuncia? : number
+    + role? : "usuario" | "auditor"
+    + image? : string
+  }
+
+  interface ITransacao {
+    + id : number
+    + valor : number
+    + data_transacao : string
+    + descricao : string
+    + e2e_id : string | null
+    + status : string
+    + origem : PickUsuario
+    + destino : PickUsuario
+  }
+
+  interface IDenuncia {
+    + id : number
+    + valor_roubado : number
+    + data_denuncia : string
+    + sla_limite : string | null
+    + e2e_id : string | null
+    + motivo : string
+    + descricao : string | null
+    + status : string
+    + transacao_id : number | null
+    + denunciado : PickUsuarioCPF | null
+  }
+
+  interface IDenunciaAuditoria {
+    + id : number
+    + valor_roubado : number
+    + data_denuncia : string
+    + sla_limite : string | null
+    + motivo : string
+    + descricao : string | null
+    + status : string
+    + denunciado : PickUsuarioCPFSaldo | null
+    + denunciante : PickUsuarioCPF | null
+  }
+}
+
+' ===========================
+' FRONTEND - SERVICOS
+' ===========================
+
+package "Frontend - Services (Axios / REST)" #Lavender {
+
+  class UsuarioService {
+    - BASE_URL : string = "/usuarios"
+    + buscarPorId(id: number) : Promise<IUsuario>
+    + listarTodos() : Promise<IUsuario[]>
+  }
+
+  class TransacaoService {
+    - BASE_URL : string = "/transacoes"
+    + listarPorUsuario(usuarioId: number) : Promise<ITransacao[]>
+  }
+
+  class DenunciaService {
+    - BASE_URL : string = "/denuncias"
+    + listarPorDenunciante(id: number) : Promise<IDenuncia[]>
+    + registrar(dados: RegistrarPayload) : Promise<IDenuncia>
+    + remover(id: number, idDenunciante: number) : void
+  }
+
+  class AuditoriaService {
+    - BASE_URL : string = "/auditoria"
+    + listarPendentes(auditor_id: number) : Promise<IDenunciaAuditoria[]>
+    + aprovar(id: number, dados: DecisaoPayload) : void
+    + recusar(id: number, dados: DecisaoPayload) : void
+  }
+
+  class PixService {
+    - BASE_URL : string = "/pix"
+    + transferir(dados: PixPayload) : Promise<PixResponse>
+  }
+}
+
+UsuarioService ..> IUsuario : retorna
+TransacaoService ..> ITransacao : retorna
+DenunciaService ..> IDenuncia : retorna
+AuditoriaService ..> IDenunciaAuditoria : retorna
+
+' ===========================
+' FRONTEND - CONTEXTO
+' ===========================
+
+package "Frontend - Context (React)" #PeachPuff {
+
+  class UserContext {
+    + idUsuario : number = 1
+    + usuario : IUsuario | null
+    + carregando : boolean
+    + isAuditor : boolean
+    + recarregar() : void
+  }
+}
+
+UserContext ..> UsuarioService : usa
+UserContext ..> IUsuario : armazena
+
+' ===========================
+' FRONTEND - PAGINAS
+' ===========================
+
+package "Frontend - Pages (React + React Router)" #Honeydew {
+
+  class PageInicio <<Page /home>> {
+    - renderGraficoPoupanca()
+    - renderAcoesRapidas()
+  }
+
+  class PagePagamento <<Page /pay>> {
+    - buscarDestinatarios()
+    - exibirAvisosDenuncia()
+  }
+
+  class PageNovoPagamento <<Page /pay/new/:id>> {
+    - confirmarTransferencia()
+    - validarSaldo()
+  }
+
+  class PageComprovante <<Page /pay/new/:id/receipt>> {
+    - exibirDetalhes()
+  }
+
+  class PageExtrato <<Page /bankstatement>> {
+    - agruparPorData()
+    - abrirModalDenuncia()
+  }
+
+  class PageDenuncias <<Page /complaints>> {
+    - removerDenuncia(id)
+  }
+
+  class PageAuditoria <<Page /auditoria>> {
+    - aprovarDenuncia(id, decisao)
+    - recusarDenuncia(id, decisao)
+    - calcularStatusSLA()
+  }
+
+  class PagePerfil <<Page /profile>> {
+    - exibirStatusConta()
+    - linkParaMED()
+  }
+}
+
+PageInicio ..> UserContext : usa
+PagePagamento ..> UsuarioService : usa
+PageNovoPagamento ..> PixService : usa
+PageExtrato ..> TransacaoService : usa
+PageExtrato ..> DenunciaService : usa
+PageDenuncias ..> DenunciaService : usa
+PageAuditoria ..> AuditoriaService : usa
+PagePerfil ..> UserContext : usa
+
+@enduml
